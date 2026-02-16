@@ -2,9 +2,13 @@
 
 @theme {
   --color-eon-red: #EA1C0A;
+  --color-eon-red-dark: #C81808;
   --color-eon-dark: #313131;
   --color-eon-light: #F6F6F6;
   --color-eon-accent: #1EA2B1;
+  --color-eon-turquoise: #00B4A0;
+  --color-eon-yellow: #FFD100;
+  --color-eon-gray: #6B7280;
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
 }
 
@@ -12,4 +16,37 @@ body {
   font-family: var(--font-sans);
   color: var(--color-eon-dark);
   background-color: #ffffff;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* E.ON-Style Range Sliders */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 999px;
+  background: #e5e7eb;
+  outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #EA1C0A;
+  cursor: pointer;
+  border: 3px solid white;
+  box-shadow: 0 2px 6px rgba(234, 28, 10, 0.3);
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #EA1C0A;
+  cursor: pointer;
+  border: 3px solid white;
+  box-shadow: 0 2px 6px rgba(234, 28, 10, 0.3);
 }

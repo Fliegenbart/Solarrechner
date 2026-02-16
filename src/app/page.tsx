@@ -8,6 +8,7 @@ import ForecastChart from "@/components/ForecastChart";
 import SmartMessages from "@/components/SmartMessages";
 import ResultCard from "@/components/ResultCard";
 import LeadForm from "@/components/LeadForm";
+import AiAnalysis from "@/components/AiAnalysis";
 import { calculateSavings, generateSmartMessages, type SolarResult } from "@/lib/solar";
 import { Sun, BarChart3, Zap, BookOpen } from "lucide-react";
 
@@ -87,32 +88,74 @@ export default function Home() {
 
   const smartMessages = result ? generateSmartMessages(result) : [];
 
+  const handleRequestAnalysis = useCallback(async (): Promise<string> => {
+    if (!result || !config || !apiData) throw new Error("Keine Daten");
+
+    const highlights = apiData.hourlyForecast
+      .filter((h) => h.power > 0)
+      .slice(0, 8)
+      .map((h) => {
+        const d = new Date(h.dt * 1000);
+        return {
+          time: d.toLocaleString("de-DE", {
+            weekday: "short",
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+          power: h.power,
+          ghi: h.ghi,
+          clouds: h.clouds ?? 0,
+          temp: h.temp ?? 0,
+        };
+      });
+
+    const res = await fetch("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        currentPower: result.currentPower,
+        totalKWh72h: result.totalKWh72h,
+        peakPower: result.peakPower,
+        peakTime: result.peakTime,
+        savingsEuro: result.savingsEuro,
+        yearlyEstimate: result.yearlyEstimate,
+        config,
+        locationName: locationName || config.plz,
+        hourlyHighlights: highlights,
+      }),
+    });
+
+    if (!res.ok) throw new Error("Analyse fehlgeschlagen");
+    const data = await res.json();
+    return data.analysis;
+  }, [result, config, apiData, locationName]);
+
   return (
-    <div className="min-h-screen bg-white">
+    <div className="min-h-screen bg-eon-light">
       {/* Hero */}
       <HeroSection
         currentGHI={apiData?.currentGHI ?? null}
         locationName={locationName}
       />
 
-      <main className="max-w-6xl mx-auto px-4 py-12">
-        <div className="grid lg:grid-cols-3 gap-8">
+      <main className="max-w-6xl mx-auto px-4 py-10 md:py-14">
+        <div className="grid lg:grid-cols-3 gap-6 lg:gap-8">
           {/* Left: Configurator */}
           <div className="lg:col-span-1">
-            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 sticky top-6">
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100/80 p-6 sticky top-4">
               <h2 className="text-lg font-bold text-eon-dark mb-1 flex items-center gap-2">
                 <Sun size={20} className="text-eon-red" />
                 Dach-Konfigurator
               </h2>
-              <p className="text-sm text-eon-dark/50 mb-6">
-                Konfiguriere dein Dach für eine Live-Berechnung
+              <p className="text-sm text-eon-gray mb-6">
+                Konfiguriere dein Dach und erhalte Live-Ergebnisse
               </p>
               <RoofConfigurator onSubmit={handleSubmit} isLoading={isLoading} />
             </div>
           </div>
 
           {/* Right: Results */}
-          <div className="lg:col-span-2 space-y-6">
+          <div className="lg:col-span-2 space-y-5">
             {error && (
               <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-700 text-sm">
                 {error}
@@ -172,6 +215,9 @@ export default function Home() {
                   <SmartMessages messages={smartMessages} />
                 </div>
 
+                {/* AI Analysis */}
+                <AiAnalysis onRequestAnalysis={handleRequestAnalysis} />
+
                 {/* Result Card */}
                 <ResultCard
                   totalKWh={result.totalKWh72h}
@@ -195,12 +241,25 @@ export default function Home() {
       </main>
 
       {/* Footer */}
-      <footer className="bg-eon-dark text-white/40 text-xs text-center py-6 mt-12">
-        <p>
-          E.ON Solar Live-Experience &middot; Wetterdaten: DWD via Bright
-          Sky &middot; Jahresertrag: PVGIS (EU) &middot; Alle Angaben ohne
-          Gewähr
-        </p>
+      <footer className="bg-eon-dark text-white/50 text-xs py-8 mt-8">
+        <div className="max-w-6xl mx-auto px-4">
+          <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+            <div className="flex items-center gap-2">
+              <div className="w-6 h-6 bg-eon-red rounded-sm flex items-center justify-center">
+                <span className="text-white font-black text-[8px]">e.on</span>
+              </div>
+              <span className="font-semibold text-white/70">
+                Solar Live-Experience
+              </span>
+            </div>
+            <p className="text-center md:text-right">
+              Wetterdaten: DWD via Bright Sky &middot; Jahresertrag: PVGIS
+              (EU) &middot; KI-Analyse: Claude (Anthropic)
+              <br />
+              Alle Angaben ohne Gewähr &middot; Kein offizielles E.ON Produkt
+            </p>
+          </div>
+        </div>
       </footer>
 
       {/* Lead Form Modal */}
