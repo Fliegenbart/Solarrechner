@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import PasswordGate from "@/components/PasswordGate";
 
 export const metadata: Metadata = {
   title: "E.ON Solar Live-Experience",
@@ -14,7 +15,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="de">
-      <body className="antialiased">{children}</body>
+      <body className="antialiased">
+        <PasswordGate>{children}</PasswordGate>
+      </body>
     </html>
   );
 }

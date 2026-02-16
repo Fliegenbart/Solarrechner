@@ -1,33 +1,37 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Lock, Sun } from "lucide-react";
 
-export default function LoginPage() {
+const PASSWORD = "solar26";
+const STORAGE_KEY = "solar-auth";
+
+export default function PasswordGate({ children }: { children: React.ReactNode }) {
+  const [authenticated, setAuthenticated] = useState(false);
   const [password, setPassword] = useState("");
   const [error, setError] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
+  const [checking, setChecking] = useState(true);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  useEffect(() => {
+    if (sessionStorage.getItem(STORAGE_KEY) === "ok") {
+      setAuthenticated(true);
+    }
+    setChecking(false);
+  }, []);
+
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    setIsLoading(true);
-    setError(false);
-
-    const res = await fetch("/api/auth", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ password }),
-    });
-
-    if (res.ok) {
-      // Full reload damit Middleware den neuen Cookie sieht
-      window.location.href = "/";
+    if (password.trim() === PASSWORD) {
+      sessionStorage.setItem(STORAGE_KEY, "ok");
+      setAuthenticated(true);
     } else {
       setError(true);
-      setIsLoading(false);
     }
   };
+
+  if (checking) return null;
+
+  if (authenticated) return <>{children}</>;
 
   return (
     <div className="min-h-screen bg-eon-light flex items-center justify-center px-4">
@@ -49,7 +53,7 @@ export default function LoginPage() {
             <input
               type="password"
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(e) => { setPassword(e.target.value); setError(false); }}
               placeholder="Passwort eingeben"
               className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-eon-red focus:ring-2 focus:ring-eon-red/20 outline-none transition-all text-lg"
               autoFocus
@@ -62,10 +66,10 @@ export default function LoginPage() {
 
           <button
             type="submit"
-            disabled={isLoading || !password}
+            disabled={!password}
             className="w-full py-3 px-6 bg-eon-red text-white font-bold rounded-full hover:bg-red-700 active:scale-[0.98] transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {isLoading ? "Prüfe..." : "Zugang erhalten"}
+            Zugang erhalten
           </button>
         </form>
       </div>
