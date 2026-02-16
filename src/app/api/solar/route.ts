@@ -1,12 +1,32 @@
 import { NextRequest, NextResponse } from "next/server";
-import { calculateSolarPower } from "@/lib/solar";
+import { calculateSolarPowerFromGHI } from "@/lib/solar";
 
-interface OneCallHourly {
-  dt: number;
-  temp: number;
-  clouds: number;
-  weather: { main: string }[];
-  uvi?: number;
+interface BrightSkyWeather {
+  timestamp: string;
+  temperature: number | null;
+  cloud_cover: number | null;
+  sunshine: number | null;
+  solar: number | null; // kWh/m² (stündlich)
+  condition: string | null;
+  icon: string | null;
+}
+
+interface BrightSkyResponse {
+  weather: BrightSkyWeather[];
+  sources: { station_name: string }[];
+}
+
+interface PVGISMonthly {
+  month: number;
+  E_d: number; // kWh/Tag Durchschnitt
+  E_m: number; // kWh/Monat
+}
+
+interface PVGISResponse {
+  outputs: {
+    monthly: { fixed: PVGISMonthly[] };
+    totals: { fixed: { E_y: number } }; // kWh/Jahr
+  };
 }
 
 export async function GET(request: NextRequest) {
@@ -24,43 +44,37 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const apiKey = process.env.OPENWEATHER_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: "API Key nicht konfiguriert" },
-      { status: 500 }
-    );
-  }
+  const latNum = parseFloat(lat);
+  const lonNum = parseFloat(lon);
 
   try {
-    // One Call API 3.0 for hourly forecast (48h) + current
-    const oneCallRes = await fetch(
-      `https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lon}&exclude=minutely,daily,alerts&units=metric&appid=${apiKey}`
-    );
+    // Parallel: Bright Sky (72h Forecast) + PVGIS (Jahresertrag)
+    const [brightSkyResult, pvgisResult] = await Promise.allSettled([
+      fetchBrightSky(latNum, lonNum),
+      fetchPVGIS(latNum, lonNum, tilt, azimuth, capacity),
+    ]);
 
-    if (!oneCallRes.ok) {
-      // Fallback: use free 2.5 API
-      const fallbackRes = await fetch(
-        `https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lon}&units=metric&appid=${apiKey}`
-      );
-
-      if (!fallbackRes.ok) {
-        return NextResponse.json(
-          { error: "Wetterdaten konnten nicht geladen werden" },
-          { status: 502 }
-        );
-      }
-
-      const fallbackData = await fallbackRes.json();
+    // Bright Sky ist Pflicht
+    if (brightSkyResult.status === "rejected") {
       return NextResponse.json(
-        buildForecastFromFallback(fallbackData, tilt, azimuth, capacity, parseFloat(lat), parseFloat(lon))
+        { error: "Wetterdaten konnten nicht geladen werden" },
+        { status: 502 }
       );
     }
 
-    const data = await oneCallRes.json();
-    return NextResponse.json(
-      buildForecastFromOneCall(data, tilt, azimuth, capacity)
-    );
+    const brightSkyData = brightSkyResult.value;
+    const forecast = buildForecast(brightSkyData, latNum, lonNum, tilt, azimuth, capacity);
+
+    // PVGIS ist optional (Jahresertrag)
+    let yearlyEstimate: { yearlyKWh: number; monthlyKWh: number[] } | undefined;
+    if (pvgisResult.status === "fulfilled" && pvgisResult.value) {
+      yearlyEstimate = pvgisResult.value;
+    }
+
+    return NextResponse.json({
+      ...forecast,
+      yearlyEstimate,
+    });
   } catch {
     return NextResponse.json(
       { error: "Solar-Berechnung fehlgeschlagen" },
@@ -69,171 +83,103 @@ export async function GET(request: NextRequest) {
   }
 }
 
-function estimateIrradiance(
-  clouds: number,
-  hour: number,
-  lat: number
-): { ghi: number; dni: number; dhi: number } {
-  // Sonnenstunden-Modell basierend auf Tageszeit
-  const solarNoon = 12;
-  const dayLength = 14; // Sommerannahme (wird später durch Jahreszeit adjustiert)
-  const sunrise = solarNoon - dayLength / 2;
-  const sunset = solarNoon + dayLength / 2;
+async function fetchBrightSky(lat: number, lon: number): Promise<BrightSkyResponse> {
+  const now = new Date();
+  const end = new Date(now.getTime() + 72 * 3600 * 1000);
 
-  if (hour < sunrise || hour > sunset) {
-    return { ghi: 0, dni: 0, dhi: 0 };
+  const dateStr = now.toISOString().slice(0, 16);
+  const endStr = end.toISOString().slice(0, 16);
+
+  const res = await fetch(
+    `https://api.brightsky.dev/weather?lat=${lat}&lon=${lon}&date=${dateStr}&last_date=${endStr}&tz=Europe/Berlin`
+  );
+
+  if (!res.ok) {
+    throw new Error(`Bright Sky error: ${res.status}`);
   }
 
-  // Sonnenwinkel-Approximation
-  const hourAngle = ((hour - solarNoon) / (dayLength / 2)) * (Math.PI / 2);
-  const solarElevation = Math.cos(hourAngle);
-
-  // Latitude-Korrektur (Deutschland ~47-55°N)
-  const latRad = (Math.abs(lat) * Math.PI) / 180;
-  const latFactor = Math.cos(latRad) * 1.4; // Normierung für Mitteleuropa
-
-  // Maximale klare Himmel GHI ≈ 1000 W/m²
-  const clearSkyGHI = 1000 * solarElevation * latFactor;
-
-  // Cloud-Reduktion
-  const cloudFactor = 1 - (clouds / 100) * 0.75;
-
-  const ghi = Math.max(0, clearSkyGHI * cloudFactor);
-  const dniRatio = cloudFactor > 0.5 ? 0.7 : 0.3;
-  const dni = ghi * dniRatio;
-  const dhi = ghi * (1 - dniRatio);
-
-  return { ghi: Math.round(ghi), dni: Math.round(dni), dhi: Math.round(dhi) };
+  return res.json();
 }
 
-function buildForecastFromOneCall(
-  data: { current: OneCallHourly; hourly: OneCallHourly[] },
+async function fetchPVGIS(
+  lat: number,
+  lon: number,
+  tilt: number,
+  azimuth: number,
+  capacity: number
+): Promise<{ yearlyKWh: number; monthlyKWh: number[] } | null> {
+  // PVGIS nutzt aspect-Konvention: 0=Süd, -90=Ost, 90=West
+  // Unsere App: azimuth 180=Süd, 90=Ost, 270=West
+  const pvgisAspect = azimuth - 180;
+
+  const res = await fetch(
+    `https://re.jrc.ec.europa.eu/api/v5_3/PVcalc?lat=${lat}&lon=${lon}&peakpower=${capacity}&angle=${tilt}&aspect=${pvgisAspect}&loss=14&outputformat=json`,
+    { signal: AbortSignal.timeout(8000) }
+  );
+
+  if (!res.ok) return null;
+
+  const data: PVGISResponse = await res.json();
+
+  const monthlyKWh = data.outputs.monthly.fixed.map((m) => Math.round(m.E_m));
+  const yearlyKWh = Math.round(data.outputs.totals.fixed.E_y);
+
+  return { yearlyKWh, monthlyKWh };
+}
+
+function buildForecast(
+  data: BrightSkyResponse,
+  lat: number,
+  lon: number,
   tilt: number,
   azimuth: number,
   capacity: number
 ) {
-  const hourly = data.hourly.map((h: OneCallHourly) => {
-    const date = new Date(h.dt * 1000);
-    const hour = date.getHours() + date.getMinutes() / 60;
-    const { ghi, dni, dhi } = estimateIrradiance(h.clouds, hour, 51); // ~DE latitude
+  const hourly = data.weather.map((w) => {
+    const date = new Date(w.timestamp);
+    const dt = Math.floor(date.getTime() / 1000);
+
+    // Bright Sky solar: kWh/m² pro Stunde → W/m² (× 1000)
+    const ghiWm2 = (w.solar ?? 0) * 1000;
+
+    const power = calculateSolarPowerFromGHI(
+      ghiWm2,
+      lat,
+      lon,
+      date,
+      tilt,
+      azimuth,
+      capacity
+    );
 
     return {
-      dt: h.dt,
-      power: calculateSolarPower(ghi, dni, dhi, tilt, azimuth, capacity),
-      ghi,
-      temp: h.temp,
-      clouds: h.clouds,
-      weather: h.weather?.[0]?.main || "",
+      dt,
+      power,
+      ghi: Math.round(ghiWm2),
+      temp: w.temperature ?? undefined,
+      clouds: w.cloud_cover ?? undefined,
+      weather: w.condition ?? "",
     };
   });
 
-  // Current power
-  const now = new Date();
-  const currentHour = now.getHours() + now.getMinutes() / 60;
-  const currentClouds = data.current?.clouds || 0;
-  const { ghi, dni, dhi } = estimateIrradiance(currentClouds, currentHour, 51);
-  const currentPower = calculateSolarPower(ghi, dni, dhi, tilt, azimuth, capacity);
+  // Aktuelle Leistung: nächster Datenpunkt zur aktuellen Zeit
+  const now = Date.now() / 1000;
+  const currentEntry = hourly.reduce((closest, h) =>
+    Math.abs(h.dt - now) < Math.abs(closest.dt - now) ? h : closest
+  );
 
-  const totalKWh = hourly.reduce((sum: number, h: { power: number }) => sum + h.power / 1000, 0);
+  const totalKWh = hourly.reduce((sum, h) => sum + h.power / 1000, 0);
   const peak = hourly.reduce(
-    (max: { power: number; dt: number }, h: { power: number; dt: number }) =>
-      h.power > max.power ? h : max,
+    (max, h) => (h.power > max.power ? h : max),
     { power: 0, dt: 0 }
   );
 
   return {
-    currentPower,
-    currentGHI: ghi,
+    currentPower: currentEntry?.power || 0,
+    currentGHI: currentEntry?.ghi || 0,
     hourlyForecast: hourly,
     totalKWh72h: Math.round(totalKWh * 10) / 10,
     peakPower: peak.power,
     peakTime: peak.dt,
   };
-}
-
-function buildForecastFromFallback(
-  data: { list: { dt: number; main: { temp: number }; clouds: { all: number }; weather: { main: string }[] }[] },
-  tilt: number,
-  azimuth: number,
-  capacity: number,
-  lat: number,
-  _lon: number
-) {
-  const hourly = data.list.map((item) => {
-    const date = new Date(item.dt * 1000);
-    const hour = date.getHours() + date.getMinutes() / 60;
-    const clouds = item.clouds?.all || 0;
-    const { ghi, dni, dhi } = estimateIrradiance(clouds, hour, lat);
-
-    return {
-      dt: item.dt,
-      power: calculateSolarPower(ghi, dni, dhi, tilt, azimuth, capacity),
-      ghi,
-      temp: item.main?.temp,
-      clouds,
-      weather: item.weather?.[0]?.main || "",
-    };
-  });
-
-  // Interpolate to get more granular data (3h -> ~1h steps)
-  const interpolated = interpolateHourly(hourly);
-
-  const now = new Date();
-  const currentHour = now.getHours() + now.getMinutes() / 60;
-  const { ghi, dni, dhi } = estimateIrradiance(
-    data.list[0]?.clouds?.all || 50,
-    currentHour,
-    lat
-  );
-  const currentPower = calculateSolarPower(ghi, dni, dhi, tilt, azimuth, capacity);
-
-  const totalKWh = interpolated.reduce((sum, h) => sum + h.power / 1000, 0);
-  const peak = interpolated.reduce(
-    (max, h) => (h.power > max.power ? h : max),
-    { power: 0, dt: 0, ghi: 0 }
-  );
-
-  return {
-    currentPower,
-    currentGHI: ghi,
-    hourlyForecast: interpolated,
-    totalKWh72h: Math.round(totalKWh * 10) / 10,
-    peakPower: peak.power,
-    peakTime: peak.dt,
-  };
-}
-
-function interpolateHourly(
-  data: { dt: number; power: number; ghi: number; temp?: number; clouds?: number; weather?: string }[]
-) {
-  const result: typeof data = [];
-
-  for (let i = 0; i < data.length - 1; i++) {
-    const curr = data[i];
-    const next = data[i + 1];
-    result.push(curr);
-
-    // Interpolate intermediate hours
-    const timeDiff = next.dt - curr.dt;
-    const steps = Math.floor(timeDiff / 3600);
-
-    for (let s = 1; s < steps; s++) {
-      const ratio = s / steps;
-      result.push({
-        dt: curr.dt + s * 3600,
-        power: Math.round(curr.power + (next.power - curr.power) * ratio),
-        ghi: Math.round(curr.ghi + (next.ghi - curr.ghi) * ratio),
-        temp: curr.temp && next.temp
-          ? Math.round((curr.temp + (next.temp - curr.temp) * ratio) * 10) / 10
-          : curr.temp,
-        clouds: curr.clouds !== undefined && next.clouds !== undefined
-          ? Math.round(curr.clouds + (next.clouds - curr.clouds) * ratio)
-          : curr.clouds,
-        weather: curr.weather,
-      });
-    }
-  }
-
-  if (data.length > 0) result.push(data[data.length - 1]);
-  return result;
 }

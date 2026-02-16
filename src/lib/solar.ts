@@ -1,19 +1,15 @@
-export interface SolarInput {
-  ghi: number; // W/m² Global Horizontal Irradiance
-  dni: number; // W/m² Direct Normal Irradiance
-  dhi: number; // W/m² Diffuse Horizontal Irradiance
-  tilt: number; // degrees 0-60
-  azimuth: number; // degrees 0-360 (180 = Süd)
-  capacityKWp: number;
-}
-
 export interface HourlyForecast {
   dt: number; // Unix timestamp
   power: number; // Watts
-  ghi: number;
+  ghi: number; // W/m²
   temp?: number;
   clouds?: number;
   weather?: string;
+}
+
+export interface YearlyEstimate {
+  yearlyKWh: number;
+  monthlyKWh: number[];
 }
 
 export interface SolarResult {
@@ -23,26 +19,120 @@ export interface SolarResult {
   peakPower: number;
   peakTime: number;
   savingsEuro: number;
+  yearlyEstimate?: YearlyEstimate;
 }
 
 const SYSTEM_LOSSES = 0.14;
-const ELECTRICITY_PRICE_EUR = 0.36; // €/kWh aktueller Durchschnitt
+const ELECTRICITY_PRICE_EUR = 0.36; // €/kWh aktueller Durchschnitt DE
 
-export function calculateSolarPower(
+/**
+ * Erbs-Modell: Zerlegt GHI in DNI und DHI.
+ * Basiert auf dem Clearness Index kt = GHI / extraterrestrische Strahlung.
+ */
+export function decomposeGHI(
   ghi: number,
-  dni: number,
-  dhi: number,
+  solarElevationDeg: number
+): { dni: number; dhi: number } {
+  if (ghi <= 0 || solarElevationDeg <= 0) {
+    return { dni: 0, dhi: 0 };
+  }
+
+  const elevRad = (solarElevationDeg * Math.PI) / 180;
+  const sinElev = Math.sin(elevRad);
+  const extraterrestrial = 1361 * sinElev;
+
+  if (extraterrestrial <= 0) return { dni: 0, dhi: 0 };
+
+  const kt = Math.min(1, ghi / extraterrestrial);
+
+  let diffuseFraction: number;
+  if (kt <= 0.22) {
+    diffuseFraction = 1 - 0.09 * kt;
+  } else if (kt <= 0.8) {
+    diffuseFraction =
+      0.9511 - 0.1604 * kt + 4.388 * kt ** 2 - 16.638 * kt ** 3 + 12.336 * kt ** 4;
+  } else {
+    diffuseFraction = 0.165;
+  }
+
+  const dhi = ghi * diffuseFraction;
+  const dni = sinElev > 0.05 ? Math.max(0, (ghi - dhi) / sinElev) : 0;
+
+  return { dni: Math.round(dni), dhi: Math.round(dhi) };
+}
+
+/**
+ * Sonnenstand berechnen (vereinfacht).
+ * Gibt Elevation in Grad zurück.
+ */
+export function getSolarElevation(
+  lat: number,
+  lon: number,
+  date: Date
+): number {
+  const dayOfYear = Math.floor(
+    (date.getTime() - new Date(date.getFullYear(), 0, 0).getTime()) / 86400000
+  );
+  const hour = date.getUTCHours() + date.getUTCMinutes() / 60;
+
+  const declination =
+    23.45 * Math.sin(((360 / 365) * (dayOfYear - 81) * Math.PI) / 180);
+  const declRad = (declination * Math.PI) / 180;
+  const latRad = (lat * Math.PI) / 180;
+
+  const solarTime = hour + lon / 15;
+  const hourAngle = ((solarTime - 12) * 15 * Math.PI) / 180;
+
+  const sinElevation =
+    Math.sin(latRad) * Math.sin(declRad) +
+    Math.cos(latRad) * Math.cos(declRad) * Math.cos(hourAngle);
+
+  return Math.max(0, (Math.asin(sinElevation) * 180) / Math.PI);
+}
+
+/**
+ * Berechnet Solarleistung aus GHI (von Bright Sky) unter Berücksichtigung
+ * von Dachneigung und Ausrichtung. Nutzt Erbs-Decomposition für DNI/DHI.
+ */
+export function calculateSolarPowerFromGHI(
+  ghi: number,
+  lat: number,
+  lon: number,
+  date: Date,
   tilt: number,
   azimuth: number,
   capacityKWp: number
 ): number {
-  const tiltRad = (tilt * Math.PI) / 180;
-  const tiltFactor = Math.cos(tiltRad);
-  // Süd-Optimierung: bei 180° (Süd) ist die Korrektur 1.0
-  const _azimuthCorrection = 1 - Math.abs(180 - azimuth) / 360;
+  if (ghi <= 0) return 0;
 
-  const estimatedGTI = dni * tiltFactor + dhi;
-  const powerWatts = (estimatedGTI / 1000) * capacityKWp * 1000 * (1 - SYSTEM_LOSSES);
+  const elevation = getSolarElevation(lat, lon, date);
+  if (elevation <= 0) return 0;
+
+  const { dni, dhi } = decomposeGHI(ghi, elevation);
+
+  const tiltRad = (tilt * Math.PI) / 180;
+
+  // Sonnenazimut-Approximation
+  const hour = date.getUTCHours() + date.getUTCMinutes() / 60 + lon / 15;
+  const solarAzimuth = hour < 12 ? 90 + (hour - 6) * 15 : 180 + (hour - 12) * 15;
+
+  // Einfallswinkel auf geneigte Fläche
+  const elevRad = (elevation * Math.PI) / 180;
+  const surfaceAzimuthRad = (azimuth * Math.PI) / 180;
+  const solarAzimuthRad = (solarAzimuth * Math.PI) / 180;
+
+  const cosIncidence =
+    Math.sin(elevRad) * Math.cos(tiltRad) +
+    Math.cos(elevRad) *
+      Math.sin(tiltRad) *
+      Math.cos(solarAzimuthRad - surfaceAzimuthRad);
+
+  const beamTilted = Math.max(0, dni * cosIncidence);
+  const diffuseTilted = dhi * (1 + Math.cos(tiltRad)) / 2;
+  const groundReflected = ghi * 0.2 * (1 - Math.cos(tiltRad)) / 2;
+
+  const gti = beamTilted + diffuseTilted + groundReflected;
+  const powerWatts = (gti / 1000) * capacityKWp * 1000 * (1 - SYSTEM_LOSSES);
 
   return Math.max(0, Math.round(powerWatts));
 }
@@ -83,9 +173,13 @@ export function generateSmartMessages(result: SolarResult): string[] {
     );
   }
 
-  if (result.savingsEuro > 5) {
+  if (result.yearlyEstimate) {
     messages.push(
-      `Du würdest in 3 Tagen ca. ${result.savingsEuro.toFixed(2)} € sparen – das sind über ${(result.savingsEuro * 122).toFixed(0)} € im Jahr.`
+      `Laut PVGIS-Daten der EU würde deine Anlage im Schnitt ${result.yearlyEstimate.yearlyKWh.toLocaleString("de-DE")} kWh pro Jahr erzeugen.`
+    );
+  } else if (result.savingsEuro > 5) {
+    messages.push(
+      `Du würdest in 3 Tagen ca. ${result.savingsEuro.toFixed(2)} € sparen.`
     );
   }
 

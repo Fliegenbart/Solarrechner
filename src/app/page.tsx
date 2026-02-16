@@ -25,6 +25,10 @@ interface ApiResponse {
   totalKWh72h: number;
   peakPower: number;
   peakTime: number;
+  yearlyEstimate?: {
+    yearlyKWh: number;
+    monthlyKWh: number[];
+  };
 }
 
 export default function Home() {
@@ -70,6 +74,7 @@ export default function Home() {
         peakPower: data.peakPower,
         peakTime: data.peakTime,
         savingsEuro: savings,
+        yearlyEstimate: data.yearlyEstimate,
       };
 
       setResult(solarResult);
@@ -171,6 +176,7 @@ export default function Home() {
                 <ResultCard
                   totalKWh={result.totalKWh72h}
                   savingsEuro={result.savingsEuro}
+                  yearlyEstimate={result.yearlyEstimate}
                   onRequestOffer={() => setShowLeadForm(true)}
                 />
 
@@ -191,8 +197,9 @@ export default function Home() {
       {/* Footer */}
       <footer className="bg-eon-dark text-white/40 text-xs text-center py-6 mt-12">
         <p>
-          E.ON Solar Live-Experience &middot; Powered by OpenWeather &middot;
-          Alle Angaben ohne Gewähr
+          E.ON Solar Live-Experience &middot; Wetterdaten: DWD via Bright
+          Sky &middot; Jahresertrag: PVGIS (EU) &middot; Alle Angaben ohne
+          Gewähr
         </p>
       </footer>
 

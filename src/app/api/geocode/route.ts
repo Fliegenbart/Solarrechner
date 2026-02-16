@@ -7,31 +7,37 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "PLZ ist erforderlich" }, { status: 400 });
   }
 
-  const apiKey = process.env.OPENWEATHER_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: "API Key nicht konfiguriert" },
-      { status: 500 }
-    );
-  }
-
   try {
     const res = await fetch(
-      `https://api.openweathermap.org/geo/1.0/zip?zip=${encodeURIComponent(plz)},DE&appid=${apiKey}`
+      `https://nominatim.openstreetmap.org/search?postalcode=${encodeURIComponent(plz)}&country=Germany&format=json&limit=1`,
+      {
+        headers: {
+          "User-Agent": "EON-Solarrechner/1.0",
+        },
+      }
     );
 
     if (!res.ok) {
+      return NextResponse.json(
+        { error: "Geocoding-Service nicht erreichbar" },
+        { status: 502 }
+      );
+    }
+
+    const data = await res.json();
+
+    if (!data.length) {
       return NextResponse.json(
         { error: "PLZ nicht gefunden" },
         { status: 404 }
       );
     }
 
-    const data = await res.json();
+    const result = data[0];
     return NextResponse.json({
-      lat: data.lat,
-      lon: data.lon,
-      name: data.name,
+      lat: parseFloat(result.lat),
+      lon: parseFloat(result.lon),
+      name: result.display_name?.split(",")[0] || plz,
     });
   } catch {
     return NextResponse.json(
