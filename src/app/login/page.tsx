@@ -1,14 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { Lock, Sun } from "lucide-react";
 
 export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const router = useRouter();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -18,12 +16,13 @@ export default function LoginPage() {
     const res = await fetch("/api/auth", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "include",
       body: JSON.stringify({ password }),
     });
 
     if (res.ok) {
-      router.push("/");
-      router.refresh();
+      // Full reload damit Middleware den neuen Cookie sieht
+      window.location.href = "/";
     } else {
       setError(true);
       setIsLoading(false);
