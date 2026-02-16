@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import HeroSection from "@/components/HeroSection";
 import RoofConfigurator, { type RoofConfig } from "@/components/RoofConfigurator";
 import GaugeChart from "@/components/GaugeChart";
@@ -9,7 +9,8 @@ import SmartMessages from "@/components/SmartMessages";
 import ResultCard from "@/components/ResultCard";
 import LeadForm from "@/components/LeadForm";
 import AiAnalysis from "@/components/AiAnalysis";
-import { calculateSavings, generateSmartMessages, type SolarResult } from "@/lib/solar";
+import OpportunityCounter from "@/components/OpportunityCounter";
+import { calculateSavings, generateSmartMessages, simulateAutarky, type SolarResult, type AutorkyResult } from "@/lib/solar";
 import { Sun, BarChart3, Zap, BookOpen } from "lucide-react";
 
 interface ApiResponse {
@@ -56,9 +57,9 @@ export default function Home() {
       const geo = await geoRes.json();
       setLocationName(geo.name);
 
-      // Step 2: Get solar forecast
+      // Step 2: Get solar forecast (inkl. Shading)
       const solarRes = await fetch(
-        `/api/solar?lat=${geo.lat}&lon=${geo.lon}&tilt=${roofConfig.tilt}&azimuth=${roofConfig.azimuth}&capacity=${roofConfig.capacityKWp}`
+        `/api/solar?lat=${geo.lat}&lon=${geo.lon}&tilt=${roofConfig.tilt}&azimuth=${roofConfig.azimuth}&capacity=${roofConfig.capacityKWp}&shading=${roofConfig.shading}`
       );
       if (!solarRes.ok) {
         const solarErr = await solarRes.json();
@@ -88,6 +89,14 @@ export default function Home() {
 
   const smartMessages = result ? generateSmartMessages(result) : [];
 
+  // Autarkie-Simulation
+  const autarky = useMemo(() => {
+    if (!result || !config) return undefined;
+    const battery5 = simulateAutarky(result.hourlyForecast, config.capacityKWp, 5);
+    const battery10 = simulateAutarky(result.hourlyForecast, config.capacityKWp, 10);
+    return { battery5, battery10 };
+  }, [result, config]);
+
   const handleRequestAnalysis = useCallback(async (): Promise<string> => {
     if (!result || !config || !apiData) throw new Error("Keine Daten");
 
@@ -109,6 +118,10 @@ export default function Home() {
         };
       });
 
+    // CO₂-Daten berechnen
+    const yearlyKWh = result.yearlyEstimate?.yearlyKWh ?? Math.round(result.totalKWh72h * 122);
+    const co2SavedKg = Math.round(yearlyKWh * 0.4);
+
     const res = await fetch("/api/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -122,13 +135,15 @@ export default function Home() {
         config,
         locationName: locationName || config.plz,
         hourlyHighlights: highlights,
+        autarky,
+        co2SavedKg,
       }),
     });
 
     if (!res.ok) throw new Error("Analyse fehlgeschlagen");
     const data = await res.json();
     return data.analysis;
-  }, [result, config, apiData, locationName]);
+  }, [result, config, apiData, locationName, autarky]);
 
   return (
     <div className="min-h-screen bg-eon-light">
@@ -201,6 +216,9 @@ export default function Home() {
                   />
                 </div>
 
+                {/* Opportunity Counter */}
+                <OpportunityCounter currentPower={result.currentPower} />
+
                 {/* Forecast Chart */}
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
                   <h3 className="text-sm font-semibold text-eon-dark/70 uppercase tracking-wide mb-4 flex items-center gap-2">
@@ -223,6 +241,7 @@ export default function Home() {
                   totalKWh={result.totalKWh72h}
                   savingsEuro={result.savingsEuro}
                   yearlyEstimate={result.yearlyEstimate}
+                  autarky={autarky}
                   onRequestOffer={() => setShowLeadForm(true)}
                 />
 

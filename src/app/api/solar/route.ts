@@ -36,6 +36,7 @@ export async function GET(request: NextRequest) {
   const tilt = parseFloat(params.get("tilt") || "30");
   const azimuth = parseFloat(params.get("azimuth") || "180");
   const capacity = parseFloat(params.get("capacity") || "10");
+  const shading = parseFloat(params.get("shading") || "0");
 
   if (!lat || !lon) {
     return NextResponse.json(
@@ -63,7 +64,7 @@ export async function GET(request: NextRequest) {
     }
 
     const brightSkyData = brightSkyResult.value;
-    const forecast = buildForecast(brightSkyData, latNum, lonNum, tilt, azimuth, capacity);
+    const forecast = buildForecast(brightSkyData, latNum, lonNum, tilt, azimuth, capacity, shading);
 
     // PVGIS ist optional (Jahresertrag)
     let yearlyEstimate: { yearlyKWh: number; monthlyKWh: number[] } | undefined;
@@ -133,7 +134,8 @@ function buildForecast(
   lon: number,
   tilt: number,
   azimuth: number,
-  capacity: number
+  capacity: number,
+  shading: number
 ) {
   const hourly = data.weather.map((w) => {
     const date = new Date(w.timestamp);
@@ -149,7 +151,8 @@ function buildForecast(
       date,
       tilt,
       azimuth,
-      capacity
+      capacity,
+      { temp: w.temperature ?? undefined, shading }
     );
 
     return {

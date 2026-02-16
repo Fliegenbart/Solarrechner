@@ -1,3 +1,5 @@
+import SunCalc from "suncalc";
+
 export interface HourlyForecast {
   dt: number; // Unix timestamp
   power: number; // Watts
@@ -12,6 +14,11 @@ export interface YearlyEstimate {
   monthlyKWh: number[];
 }
 
+export interface AutorkyResult {
+  autarkyPercent: number;
+  selfConsumptionPercent: number;
+}
+
 export interface SolarResult {
   currentPower: number; // Watts
   hourlyForecast: HourlyForecast[];
@@ -22,7 +29,7 @@ export interface SolarResult {
   yearlyEstimate?: YearlyEstimate;
 }
 
-const SYSTEM_LOSSES = 0.14;
+const BASE_SYSTEM_LOSSES = 0.14;
 const ELECTRICITY_PRICE_EUR = 0.36; // €/kWh aktueller Durchschnitt DE
 
 /**
@@ -62,37 +69,43 @@ export function decomposeGHI(
 }
 
 /**
- * Sonnenstand berechnen (vereinfacht).
- * Gibt Elevation in Grad zurück.
+ * Sonnenstand berechnen via SunCalc (präzise Astronomie).
+ * Gibt { elevation, azimuth } in Grad zurück.
+ * SunCalc azimuth: 0=Süd, positiv=West → Umrechnung zu 0=Nord, 180=Süd.
+ */
+export function getSolarPosition(
+  lat: number,
+  lon: number,
+  date: Date
+): { elevation: number; azimuth: number } {
+  const pos = SunCalc.getPosition(date, lat, lon);
+  // SunCalc: altitude in Rad, azimuth in Rad (0=Süd, West=positiv)
+  const elevation = (pos.altitude * 180) / Math.PI;
+  // Konvertiere zu Kompass-Azimut: 0=Nord, 90=Ost, 180=Süd, 270=West
+  let azimuth = ((pos.azimuth * 180) / Math.PI + 180) % 360;
+  if (azimuth < 0) azimuth += 360;
+
+  return {
+    elevation: Math.max(0, elevation),
+    azimuth,
+  };
+}
+
+/**
+ * Legacy-Wrapper für Kompatibilität.
  */
 export function getSolarElevation(
   lat: number,
   lon: number,
   date: Date
 ): number {
-  const dayOfYear = Math.floor(
-    (date.getTime() - new Date(date.getFullYear(), 0, 0).getTime()) / 86400000
-  );
-  const hour = date.getUTCHours() + date.getUTCMinutes() / 60;
-
-  const declination =
-    23.45 * Math.sin(((360 / 365) * (dayOfYear - 81) * Math.PI) / 180);
-  const declRad = (declination * Math.PI) / 180;
-  const latRad = (lat * Math.PI) / 180;
-
-  const solarTime = hour + lon / 15;
-  const hourAngle = ((solarTime - 12) * 15 * Math.PI) / 180;
-
-  const sinElevation =
-    Math.sin(latRad) * Math.sin(declRad) +
-    Math.cos(latRad) * Math.cos(declRad) * Math.cos(hourAngle);
-
-  return Math.max(0, (Math.asin(sinElevation) * 180) / Math.PI);
+  return getSolarPosition(lat, lon, date).elevation;
 }
 
 /**
  * Berechnet Solarleistung aus GHI (von Bright Sky) unter Berücksichtigung
- * von Dachneigung und Ausrichtung. Nutzt Erbs-Decomposition für DNI/DHI.
+ * von Dachneigung, Ausrichtung, Temperatur und Verschattung.
+ * Nutzt SunCalc für präzisen Sonnenstand und Erbs-Decomposition für DNI/DHI.
  */
 export function calculateSolarPowerFromGHI(
   ghi: number,
@@ -101,25 +114,22 @@ export function calculateSolarPowerFromGHI(
   date: Date,
   tilt: number,
   azimuth: number,
-  capacityKWp: number
+  capacityKWp: number,
+  options?: { temp?: number; shading?: number }
 ): number {
   if (ghi <= 0) return 0;
 
-  const elevation = getSolarElevation(lat, lon, date);
-  if (elevation <= 0) return 0;
+  const sunPos = getSolarPosition(lat, lon, date);
+  if (sunPos.elevation <= 0) return 0;
 
-  const { dni, dhi } = decomposeGHI(ghi, elevation);
+  const { dni, dhi } = decomposeGHI(ghi, sunPos.elevation);
 
   const tiltRad = (tilt * Math.PI) / 180;
 
-  // Sonnenazimut-Approximation
-  const hour = date.getUTCHours() + date.getUTCMinutes() / 60 + lon / 15;
-  const solarAzimuth = hour < 12 ? 90 + (hour - 6) * 15 : 180 + (hour - 12) * 15;
-
-  // Einfallswinkel auf geneigte Fläche
-  const elevRad = (elevation * Math.PI) / 180;
+  // Präziser Sonnenazimut aus SunCalc
+  const elevRad = (sunPos.elevation * Math.PI) / 180;
   const surfaceAzimuthRad = (azimuth * Math.PI) / 180;
-  const solarAzimuthRad = (solarAzimuth * Math.PI) / 180;
+  const solarAzimuthRad = (sunPos.azimuth * Math.PI) / 180;
 
   const cosIncidence =
     Math.sin(elevRad) * Math.cos(tiltRad) +
@@ -132,13 +142,92 @@ export function calculateSolarPowerFromGHI(
   const groundReflected = ghi * 0.2 * (1 - Math.cos(tiltRad)) / 2;
 
   const gti = beamTilted + diffuseTilted + groundReflected;
-  const powerWatts = (gti / 1000) * capacityKWp * 1000 * (1 - SYSTEM_LOSSES);
+
+  // Verluste: Basis + Verschattung
+  const shadingLoss = (options?.shading ?? 0) / 100;
+  const totalLosses = BASE_SYSTEM_LOSSES + shadingLoss;
+
+  let powerWatts = (gti / 1000) * capacityKWp * 1000 * (1 - totalLosses);
+
+  // Temperatur-Koeffizient (NOCT-Approximation)
+  if (options?.temp !== undefined) {
+    const cellTemp = options.temp + 25; // Zelltemp ≈ Umgebung + 25°C
+    const tempLoss = Math.max(0, (cellTemp - 25) * 0.004); // -0.4%/°C über 25°C
+    powerWatts *= 1 - tempLoss;
+  }
 
   return Math.max(0, Math.round(powerWatts));
 }
 
 export function calculateSavings(totalKWh: number): number {
   return Math.round(totalKWh * ELECTRICITY_PRICE_EUR * 100) / 100;
+}
+
+/**
+ * Simuliert Autarkie mit einem Standard-Haushaltslastprofil.
+ * ~3500 kWh/Jahr ≈ 400W Durchschnitt mit Tagesgang.
+ */
+export function simulateAutarky(
+  hourlyForecast: HourlyForecast[],
+  capacityKWp: number,
+  batteryKWh: number
+): AutorkyResult {
+  // Typisches Lastprofil (relative Faktoren, normiert auf ~400W Durchschnitt)
+  const loadProfile: Record<number, number> = {
+    0: 200, 1: 180, 2: 170, 3: 170, 4: 180, 5: 220,
+    6: 350, 7: 500, 8: 450, 9: 380, 10: 350, 11: 380,
+    12: 500, 13: 450, 14: 380, 15: 350, 16: 380, 17: 500,
+    18: 650, 19: 700, 20: 600, 21: 500, 22: 380, 23: 280,
+  };
+
+  let batteryCharge = 0; // kWh aktuell im Speicher
+  let totalConsumption = 0; // kWh
+  let totalProduction = 0; // kWh
+  let selfConsumed = 0; // kWh direkt + aus Batterie
+
+  for (const hour of hourlyForecast) {
+    const d = new Date(hour.dt * 1000);
+    const h = d.getHours();
+    const consumptionW = loadProfile[h] ?? 400;
+    const consumptionKWh = consumptionW / 1000;
+    const productionKWh = hour.power / 1000;
+
+    totalConsumption += consumptionKWh;
+    totalProduction += productionKWh;
+
+    const surplus = productionKWh - consumptionKWh;
+
+    if (surplus >= 0) {
+      // Produktion > Verbrauch: Alles selbst verbraucht + Überschuss in Batterie
+      selfConsumed += consumptionKWh;
+      const chargeable = Math.min(surplus, batteryKWh - batteryCharge);
+      batteryCharge += chargeable;
+    } else {
+      // Verbrauch > Produktion: Direkt + aus Batterie
+      selfConsumed += productionKWh;
+      const deficit = -surplus;
+      const fromBattery = Math.min(deficit, batteryCharge);
+      batteryCharge -= fromBattery;
+      selfConsumed += fromBattery;
+    }
+  }
+
+  const autarkyPercent =
+    totalConsumption > 0
+      ? Math.round((selfConsumed / totalConsumption) * 100)
+      : 0;
+
+  const selfConsumptionPercent =
+    totalProduction > 0
+      ? Math.round(
+          (Math.min(selfConsumed, totalProduction) / totalProduction) * 100
+        )
+      : 0;
+
+  return {
+    autarkyPercent: Math.min(100, autarkyPercent),
+    selfConsumptionPercent: Math.min(100, selfConsumptionPercent),
+  };
 }
 
 export function generateSmartMessages(result: SolarResult): string[] {

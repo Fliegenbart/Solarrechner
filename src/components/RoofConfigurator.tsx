@@ -1,13 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { MapPin, RotateCw, Triangle, Zap } from "lucide-react";
+import { MapPin, RotateCw, Triangle, Zap, TreePine } from "lucide-react";
 
 export interface RoofConfig {
   plz: string;
   tilt: number;
   azimuth: number;
   capacityKWp: number;
+  shading: number;
 }
 
 interface RoofConfiguratorProps {
@@ -43,10 +44,11 @@ export default function RoofConfigurator({
   const [tilt, setTilt] = useState(30);
   const [azimuth, setAzimuth] = useState(180);
   const [capacityKWp, setCapacityKWp] = useState(10);
+  const [shading, setShading] = useState(0);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    onSubmit({ plz, tilt, azimuth, capacityKWp });
+    onSubmit({ plz, tilt, azimuth, capacityKWp, shading });
   };
 
   return (
@@ -130,6 +132,27 @@ export default function RoofConfigurator({
         <div className="flex justify-between text-xs text-eon-dark/40 mt-1">
           <span>3 kWp</span>
           <span>30 kWp</span>
+        </div>
+      </div>
+
+      {/* Verschattung */}
+      <div>
+        <label className="flex items-center gap-2 text-sm font-semibold text-eon-dark mb-2">
+          <TreePine size={16} className="text-eon-red" />
+          Verschattung: {shading}%
+        </label>
+        <input
+          type="range"
+          min={0}
+          max={30}
+          step={1}
+          value={shading}
+          onChange={(e) => setShading(Number(e.target.value))}
+          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-eon-red"
+        />
+        <div className="flex justify-between text-xs text-eon-dark/40 mt-1">
+          <span>Keine</span>
+          <span>Stark (30%)</span>
         </div>
       </div>
 

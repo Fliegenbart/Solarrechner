@@ -25,6 +25,7 @@
     "@tailwindcss/postcss": "^4.1.18",
     "@types/node": "^25.2.3",
     "@types/react": "^19.2.14",
+    "@types/suncalc": "^1.9.2",
     "autoprefixer": "^10.4.24",
     "lucide-react": "^0.564.0",
     "next": "^16.1.6",
@@ -32,6 +33,7 @@
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "recharts": "^3.7.0",
+    "suncalc": "^1.9.0",
     "tailwindcss": "^4.1.18",
     "typescript": "^5.9.3"
   },
